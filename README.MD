@@ -206,7 +206,7 @@ This fork extends [AlmostFrii](https://github.com/MCMANIRX/AlmostFrii) by [MCMAN
 
 ## Flashing the firmware
 
-Prebuilt firmware is published in the [Releases](https://github.com/LoZioo/AlmostFrii/releases) page of this fork. Download the `wii-nand-interf.uf2` file of the latest release (use `wii-nand-interf-pico_w.uf2` for a Pico W, if provided).
+Prebuilt firmware is published in the [Releases](https://github.com/LoZioo/AlmostFrii/releases) page of this fork. Download the `wii-nand-interf.uf2` file of the latest release. The same file works on the Pico and on the Pico W (same RP2040 and pins); the Pico 2 / Pico 2 W (RP2350) are not supported by this build.
 
 1. Unplug the Pico from USB.
 2. Hold the **BOOTSEL** button and plug the Pico back in, then release the button. A drive named `RPI-RP2` appears.
@@ -299,6 +299,7 @@ These folders contain the console keys and are ignored by git: never publish the
   - garbage on the serial line without `$me` no longer overflows the command buffer.
 - **Page transmission**: `read_page()` sent the page only while bytes were waiting in the USB *receive* buffer (it worked thanks to the `\r` sent by the scripts after each command) and could send bytes past the end of the page. It now waits for room in the *transmit* buffer and sends exactly 2112 bytes.
 - **`$id$me`**: the four ID bytes are printed in a well defined order (the arguments of `printf()` were evaluated in an unspecified order).
+- **Pico and Pico W**: the unused LED code (and the separate `pico_w` build, which only initialized the wireless chip to drive the LED) was removed: the same `.uf2` runs on both boards.
 
 ## Script changes
 

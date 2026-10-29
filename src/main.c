@@ -5,26 +5,7 @@
 #include <string.h>
 #include "tusb.h"
 
-#ifdef PICO_W_BOARD
-    #include "pico/cyw43_arch.h"
-#else
-    #define LED_PIN 25 
-#endif
-
-
 #include "commands.h"
-
-
-void toggle_LED(bool value)
-{
-#ifdef PICO_W_BOARD
-    // Pico W uses the CYW43 WiFi chip LED
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, value);
-#else
-    // Regular Pico uses GPIO LED
-    gpio_put(LED_PIN, value);
-#endif
-}
 
 
 u8 str[100] = {0};
@@ -54,7 +35,7 @@ bool marker_found(char *marker) {
     return false;
 }
 
-inline bool addr_to_u32(int start_idx, int end_idx, u32 *addr) {
+static inline bool addr_to_u32(int start_idx, int end_idx, u32 *addr) {
 
         *addr = 0;
         for (int i = start_idx + 1; i < end_idx; i++) {
@@ -95,7 +76,7 @@ bool decompose_addr(u32 *addr) {
 }
 
 
-inline int read_byte_blocking(void) {
+static inline int read_byte_blocking(void) {
     uint8_t b;
     while (tud_cdc_read(&b, 1) != 1) {}
     return b;
@@ -355,19 +336,7 @@ int main()
 
     stdio_init_all();
 
-
-
-    #ifdef PICO_W_BOARD
-
-        // Initialise the Wi-Fi chip
-        if (cyw43_arch_init()) {
-            printf("Wi-Fi init failed\n");
-            return -1;
-        }
-    #else
-        gpio_init(LED_PIN);
-        gpio_set_dir(LED_PIN,GPIO_OUT);
-    #endif
+    // no LED is used: the same firmware runs on the Pico and on the Pico W
 
     init_gpio();
 

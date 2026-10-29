@@ -536,7 +536,6 @@ void read_page(u32 addr) {
 }
 
 void write_page(u32 addr, u8 *buf, size_t len, bool test, u8 test_val) {
-    //cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
     gpio_put(WP_,1);
     gpio_put(RE_,1);
@@ -567,7 +566,6 @@ void write_page(u32 addr, u8 *buf, size_t len, bool test, u8 test_val) {
 
     gpio_put(CE_,1);
     gpio_put(WP_,0);
-    //cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
 
 }
 

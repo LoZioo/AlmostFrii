@@ -49,14 +49,6 @@ pico_enable_stdio_uart(wii-nand-interf 0)
 pico_enable_stdio_usb(wii-nand-interf 1)
 
 
-if (PICO_BOARD STREQUAL "pico_w")
-    message(STATUS "Building for Pico W")
-    target_compile_definitions(wii-nand-interf PRIVATE PICO_W_BOARD)
-    target_link_libraries(wii-nand-interf
-        pico_cyw43_arch_none
-    )
-endif()
-
 target_link_libraries(wii-nand-interf
     pico_stdlib
     pico_mbedtls
