@@ -113,9 +113,10 @@ void pio_to_gpio() {
         gpio_put(io[i],0);
     }
     
-    gpio_init(RE_);
-    gpio_set_dir(RE_,GPIO_OUT);
+    // set the level before the direction, so RE never glitches low
     gpio_put(RE_,1);
+    gpio_set_function(RE_,GPIO_FUNC_SIO);
+    gpio_set_dir(RE_,GPIO_OUT);
 
 }
 
@@ -407,11 +408,61 @@ void read_status() {
 
     send_cmd(STATUS_REGISTER);
     IO_IN();
+    sleep_us(1); // tWHR >= 60ns
     gpio_put(RE_,0);
+    sleep_us(1); // tREA <= 20ns
 
     status = read_io();
     gpio_put(RE_,1);
 
+}
+
+// wait for the end of a program/erase operation and read its status
+static void wait_ready() {
+    sleep_us(1); // tWB <= 100ns: R/B may still be high right after the command
+    while(!gpio_get(RB));
+    read_status();
+}
+
+// read a single spare byte (column 2048) with plain GPIO, without PIO/DMA
+static u8 read_spare_byte(u32 addr) {
+
+    gpio_put(WP_,0);
+    gpio_put(RE_,1);
+    gpio_put(ALE,0);
+    gpio_put(CE_,0);
+    IO_OUT();
+
+    u8 addr_frames[5] = {0};
+    cache_addr(addr,addr_frames);
+    addr_frames[1] = 2048 >> 8; // column 2048 = first spare byte
+
+    send_cmd(START_READ);
+
+    hy_put(ALE,1);
+    send_addr(addr_frames);
+    gpio_put(ALE,0);
+
+    send_cmd(READ1);
+    IO_IN();
+    sleep_us(1);
+    while(!gpio_get(RB));
+    sleep_us(1); // tRR >= 20ns
+
+    gpio_put(RE_,0);
+    sleep_us(1);
+    u8 value = read_io();
+    gpio_put(RE_,1);
+
+    gpio_put(CE_,1);
+
+    return value;
+}
+
+// factory bad blocks have a non-FF first spare byte in page 0 or 1
+bool is_bad_block(u32 block) {
+    u32 page = block << 6;
+    return read_spare_byte(page) != 0xff || read_spare_byte(page + 1) != 0xff;
 }
 
 
@@ -507,12 +558,7 @@ void write_page(u32 addr, u8 *buf, size_t len, bool test, u8 test_val) {
 
 
     send_cmd(CONFIRM_PROGRAM);
-    wait_100();
-
-    //puts("writing");
-    while(!gpio_get(RB));
-    //    puts(".");
-    //puts("done.\n");
+    wait_ready();
 
     if(status&1)
         puts("WERR");
@@ -524,7 +570,7 @@ void write_page(u32 addr, u8 *buf, size_t len, bool test, u8 test_val) {
 
 }
 
-void erase_block(u32 addr) {
+bool erase_block(u32 addr) {
     addr<<=6;
 
 
@@ -544,29 +590,35 @@ void erase_block(u32 addr) {
     gpio_put(ALE,0);
 
     send_cmd(CONFIRM_ERASE);
-    wait_100();
+    wait_ready();
 
-    printf("erasing");
-    while(!gpio_get(RB))
-        printf(".");
-    printf("done.\n");
-
-    read_status();
-
-    if(status&1)
-        puts("EERR");
-
+    gpio_put(CE_,1);
     gpio_put(WP_,0);
 
+    return !(status&1);
 }
 
 void erase_chip() {
 
-    for(int i = 0; i < 0x1000; ++i){
-        printf("block %d: ",i);
-        erase_block(i&0xfff);
+    int skipped = 0;
+    int failed = 0;
+
+    for(int i = 0; i < BLOCK_COUNT; ++i){
+        // never erase factory bad blocks: erasing would destroy their marker
+        if(is_bad_block(i)) {
+            printf("block %d: bad block, skipped\n",i);
+            skipped++;
+            continue;
+        }
+
+        if(!erase_block(i)) {
+            printf("block %d: EERR\n",i);
+            failed++;
+        }
+        else if(i%256 == 0)
+            printf("block %d: erased\n",i);
     }
-    printf("erase complete.");
+    printf("erase complete. bad blocks skipped: %d, erase errors: %d\n",skipped,failed);
 }
 
 

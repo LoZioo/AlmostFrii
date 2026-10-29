@@ -152,7 +152,7 @@ if do_block_SHA:
         
         time_out = time.time()
         while(True):
-            line = ser.readline()[:-2].decode('utf-8')
+            line = ser.readline()[:-2].decode('utf-8', errors='replace')
             if("SHA: " in line):
                 sha256 = line.split("SHA: ", 1)[1]
                 if(sha256 == original_sha256):

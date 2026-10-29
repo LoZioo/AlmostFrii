@@ -2,7 +2,6 @@
 #include "pico/stdlib.h"
 #include "stdlib.h"
 #include <math.h>
-#include "crc.h"
 #include <string.h>
 #include "tusb.h"
 
@@ -74,6 +73,7 @@ inline u32 addr_to_u32(int start_idx, int end_idx) {
         addr = (addr << 4) | value;
     }
 
+    return addr;
 }
 
 
@@ -148,7 +148,7 @@ void console() {
 
 
             // wait for chunk prefix
-            u8 mrkr[3] = {0};
+            u8 mrkr[4] = {0}; // 3 chars + terminator (copied into failMsg)
             read_n_bytes(mrkr,0,3);
 
             if(strncmp(mrkr,BYTES_START,3)!=0){
@@ -201,8 +201,9 @@ void console() {
             char ack = '\0';
             read_n_bytes(&ack,0,1);
 
-            if(strncmp(&ack,"w",1)!=0){
-                strcpy(failMsg,&ack);
+            if(ack != 'w'){
+                // host rejected the buffer (e.g. bad SHA): drop the page, host will resend it
+                strcpy(failMsg,"page not written");
 
                 goto end;
             }
@@ -219,15 +220,10 @@ void console() {
                 readMode = false;
                 str_idx = 0;
                 buffer_bytes = 0;
-                bool flicker = false;
 
+                // report the failure and go back to the console: the host retries the page
                 if(!writeComplete)
-                    while(1) {
-                        toggle_LED(flicker);
-                        flicker = !flicker;
-                        sleep_ms(100);
-                        printf("%s\n",failMsg);
-                    }
+                    printf("%s\n",failMsg);
 
                 writeComplete = false;
                 continue;
@@ -290,7 +286,11 @@ void console() {
                     get_page_SHA(decompose_addr()&0x3ffff);
                  }
                 else if(marker_found(BLOCK_ERASE)){
-                    erase_block((decompose_addr()&0xfff)); // block erase (takes row address only)       
+                    u32 block = decompose_addr()&0xfff;
+                    if(is_bad_block(block))
+                        printf("block %d: bad block, skipped\n",block);
+                    else
+                        puts(erase_block(block) ? "erased" : "EERR"); // block erase (takes row address only)       
                 }
                 else if(marker_found(CHIP_ERASE)){
                     erase_chip(); // full chip erase

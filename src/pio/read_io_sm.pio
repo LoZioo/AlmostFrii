@@ -10,12 +10,12 @@ mov x, y
 
 .wrap_target
 wait 0 irq 1
-    set pins, 0 [1] ; dummy read
+    set pins, 1 [7] ; settle with RE high (no dummy pulse: it may consume byte 0)
     set pins, 1 [5]
 
 loop:
-    set pins, 0 
-    in pins, 8  
+    set pins, 0 [7] ; RE low: wait > tREA (20ns) before sampling, with margin for long wires
+    in pins, 8
     set pins, 1  [5] ; wait sufficiently long to avoid misreads
     jmp x-- loop
 
@@ -48,6 +48,8 @@ static inline void read_io_sm_init(PIO pio, uint sm, uint offset, uint io_base, 
     pio_sm_set_consecutive_pindirs(pio,sm,io_base,num_io,GPIO_IN);
     pio_sm_set_in_pins(pio,sm,io_base);
 
+    // RE must idle high: if PIO drives it low before the first read, the first byte of the page is skipped
+    pio_sm_set_pins_with_mask(pio,sm,1u << re_,1u << re_);
     pio_gpio_init(pio, re_);
     pio_sm_set_consecutive_pindirs(pio,sm,re_,1,GPIO_OUT);
     pio_sm_set_set_pins(pio,sm,re_,1);

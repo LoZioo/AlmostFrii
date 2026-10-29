@@ -133,12 +133,27 @@ if do_block_SHA:
 if do_block_SHA or do_page_SHA:
     opt_str+="SHA256 calculation"
 
-opt_str+=F", starting at block address {hex(addr)} for {nblocks} blocks"
+opt_str+=F", starting at block address {hex(block_addr)} for {nblocks} blocks"
 opt_str+=F" via port {serial_port}"
     
 print(opt_str) 
 if debug:
     quit()
+
+if nblocks == 0:
+    print("ERROR: no blocks to write, use -l (e.g. -l4096)")
+    quit()
+
+# factory bad blocks (non-FF first spare byte in page 0 or 1) are never written nor verified:
+# the firmware never erases them, so their marker on the chip stays intact
+bad_blocks = set()
+for block in range(block_addr, block_addr + nblocks):
+    for pg in (0, 1):
+        f.seek(block*BLOCK_SIZE + pg*PAGE_SIZE + 2048)
+        if f.read(1) != b'\xff':
+            bad_blocks.add(block)
+            break
+print(F"Bad blocks in image (skipped): {sorted(bad_blocks)}")
 
 pathlib.Path("program_log").mkdir(parents=True, exist_ok=True)
 log = open('program_log/log-'+str(int(time.time()))+".txt", 'w')
@@ -158,7 +173,7 @@ addr = block_addr *PAGE_COUNT
 offset = addr
 end_offset = (nblocks *PAGE_COUNT) + addr
 sector = block_addr
-f.seek(offset)
+f.seek(offset*PAGE_SIZE)
 
 start_time = time.time()
 
@@ -168,11 +183,13 @@ if do_write and not do_test_write:
 
 
         if(addr%(0x40)==0):
+            f.seek(offset*PAGE_SIZE)
             sha256 = hashlib.sha256(f.read(BLOCK_SIZE)).hexdigest()
             #print(sha256)
-            if sha256 == EMPTY_BLOCK:
-                print(F"skipping null block {sector}")
-                log.write(F"skipping null block {sector}\n")
+            if sha256 == EMPTY_BLOCK or sector in bad_blocks:
+                reason = "bad block" if sector in bad_blocks else "null block"
+                print(F"skipping {reason} {sector}")
+                log.write(F"skipping {reason} {sector}\n")
 
                 sector+=1
                 addr+=PAGE_COUNT
@@ -232,11 +249,11 @@ if do_write and not do_test_write:
                 if time.time() > 0.1 +time_out1:
                     break
 
-                line = ser.readline()[:-2].decode('utf-8')
+                line = ser.readline()[:-2].decode('utf-8', errors='replace')
                 if("SHA: " in line):
                     sha256 = line.split("SHA: ", 1)[1]
                     if(sha256 == original_sha256):
-                        sha_good = True   
+                        sha_good = True
                         #print(sha256)               
                     else:
                         print("bad SHA. Retrying!")
@@ -249,15 +266,16 @@ if do_write and not do_test_write:
         # wait for write complete ack
         time_out = time.time()
         while True:
-            line = ser.readline().decode('utf-8')
-            
+            line = ser.readline().decode('utf-8', errors='replace')
+
             if time.time() > 1 +time_out:
                 print(F"[{(time.time())}] ERROR: timeout on write ACK")
                 log.write(F"[{(time.time())}] ERROR: timeout on write ACK, page {addr}, block {int(addr/0x40)}")
-                
+                quit()
+
             elif 'WERR' in line:
-                print(F"[{(time.time())}] ERROR: line write error")
-                log.write(F"[{(time.time())}] ERROR: line write error\n")
+                print(F"[{(time.time())}] ERROR: write error on page {addr}, block {int(addr/0x40)}")
+                log.write(F"[{(time.time())}] ERROR: write error on page {addr}, block {int(addr/0x40)}\n")
                 quit()
                 
             elif 'wc' in line:
@@ -305,6 +323,10 @@ if do_page_SHA:
     offset = addr
     end_offset = (nblocks *PAGE_COUNT) + addr
     while addr < end_offset:
+        if addr // PAGE_COUNT in bad_blocks:
+            offset+=1
+            addr+=1
+            continue
         f.seek(offset*(PAGE_SIZE))
         #print(hex(offset*PAGE_SIZE))
         original_sha256 = hashlib.sha256(f.read(PAGE_SIZE)).hexdigest()
@@ -315,7 +337,7 @@ if do_page_SHA:
     
         time_out = time.time()
         while(True):
-            line = ser.readline()[:-2].decode('utf-8')
+            line = ser.readline()[:-2].decode('utf-8', errors='replace')
             if("SHA: " in line):
                 sha256 = line.split("SHA: ", 1)[1]
                 if(not sha256 or (sha256 != original_sha256)):
@@ -354,16 +376,22 @@ if do_block_SHA:
     offset = addr
     end_offset = nblocks + addr
     while addr < end_offset:
+        if addr in bad_blocks:
+            print(F"skipping bad block {addr}")
+            log.write(F"skipping bad block {addr}\n")
+            offset+=1
+            addr+=1
+            continue
         f.seek(offset*(BLOCK_SIZE))
         original_sha256 = hashlib.sha256(f.read(BLOCK_SIZE)).hexdigest()
-        
+
         payload = ('&{:X}'.format(addr)+cc.BLOCK_SHA+cc.MESSAGE_END).encode()
         ser.write(payload)
-        
-        
+
+
         time_out = time.time()
         while(True):
-            line = ser.readline()[:-2].decode('utf-8')
+            line = ser.readline()[:-2].decode('utf-8', errors='replace')
             if("SHA: " in line):
                 sha256 = line.split("SHA: ", 1)[1]
                 if(sha256 == original_sha256):
