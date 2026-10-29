@@ -45,11 +45,8 @@ try:
     out(F"Dumping {nt.BLOCK_COUNT} blocks to {filename}")
 
     nand = bytearray()
-    last_time = time.time()
     for block in range(nt.BLOCK_COUNT):
-        if block % 64 == 0:
-            print(F"reading block {block} ({block * nt.BLOCK_SIZE / 1E6:.1f} MB), {time.time() - last_time:.1f} s")
-            last_time = time.time()
+        block_time = time.time()
 
         # each block is checked against the SHA256 computed by the Pico on a second, independent read
         chip_sha = nt.chip_block_sha(ser, block)
@@ -62,6 +59,7 @@ try:
         else:
             out(F"WARNING: block {block} could not be read consistently")
         nand += data
+        print(F"block {block}/{nt.BLOCK_COUNT - 1} read ({len(nand) / 1E6:.1f} MB), {time.time() - block_time:.2f} s")
 
 finally:
     ser.close()

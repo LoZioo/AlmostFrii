@@ -97,18 +97,19 @@ try:
     out("")
     out("=====WRITE=====")
     start_time = time.time()
-    last_time = start_time
     for block in range(nt.BLOCK_COUNT):
-        if block % 64 == 0:
-            print(F"writing block {block} ({block * nt.BLOCK_SIZE / 1E6:.1f} MB), {time.time() - last_time:.1f} s")
-            last_time = time.time()
+        block_time = time.time()
         if block in image_bad:
+            print(F"block {block}/{nt.BLOCK_COUNT - 1}: bad block, skipped")
             continue
+        written = 0
         for pg in range(nt.PAGE_COUNT):
             index = block * nt.PAGE_COUNT + pg
             data = nt.page(nand, index)
             if data != nt.ERASED_PAGE:  # the chip is already erased
                 nt.write_page(ser, index, data)
+                written += 1
+        print(F"block {block}/{nt.BLOCK_COUNT - 1}: {written} pages written, {time.time() - block_time:.2f} s")
     out(F"Write completed in {(time.time() - start_time) / 60:.1f} minutes.")
 
     # ===== verify =====
@@ -116,9 +117,8 @@ try:
     out("=====VERIFY=====")
     mismatches = []
     for block in range(nt.BLOCK_COUNT):
-        if block % 512 == 0:
-            print(F"verifying block {block}...")
         if block in image_bad:
+            print(F"block {block}/{nt.BLOCK_COUNT - 1}: bad block, skipped")
             continue
         expected = hashlib.sha256(nt.block(nand, block)).hexdigest()
         if nt.chip_block_sha(ser, block) != expected:
@@ -126,6 +126,8 @@ try:
             if nt.chip_block_sha(ser, block) != expected:
                 mismatches.append(block)
                 out(F"block {block}: MISMATCH")
+                continue
+        print(F"block {block}/{nt.BLOCK_COUNT - 1}: verified")
 
 except nt.NandError as e:
     fail(str(e))
