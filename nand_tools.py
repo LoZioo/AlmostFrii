@@ -134,7 +134,6 @@ def write_page(ser, page, data, retries=5):
             raise NandError(F"no write ACK for page {page}")
         if line.startswith("WERR"):
             raise NandError(F"write error on page {page} (block {page // PAGE_COUNT})")
-        wait_line(ser, ["wc"], timeout=1)  # WERR, if any, is followed by wc
         return
 
     raise NandError(F"page {page}: data corrupted on USB {retries} times")
