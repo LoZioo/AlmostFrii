@@ -55,7 +55,11 @@ out(F"Image: {args.image}")
 out("=====IMAGE CHECK=====")
 if not nt.analyze(nand, keys, out=out):
     fail("no superblock HMAC matches the console keys: this image does not belong to this console")
-image_bad = nt.image_bad_blocks(nand)
+
+# blocks never written: factory bad blocks of the image and blocks marked bad in its FAT
+image_factory_bad = nt.image_bad_blocks(nand)
+image_bad = sorted(set(image_factory_bad) | set(nt.fat_bad_blocks(nand, nt.check_superblocks(nand, keys))))
+out(F"Blocks not written (factory or FAT bad): {image_bad}")
 
 ser = serial.Serial(args.port, 115200, timeout=3, write_timeout=3)
 
@@ -65,9 +69,12 @@ try:
     out("=====CHIP CHECK=====")
     out(F"NAND ID: {nt.check_id(ser)}")
     chip_bad = nt.chip_bad_blocks(ser)
-    out(F"Bad blocks on chip: {chip_bad}")
-    if chip_bad != image_bad:
-        fail(F"bad blocks of the chip {chip_bad} differ from the image ones {image_bad}")
+    out(F"Bad blocks on chip (factory marker): {chip_bad}")
+    # the image may know more bad blocks than the chip (found by the console during use),
+    # but every bad block of the chip must be excluded by the image too
+    unknown = [b for b in chip_bad if b not in image_bad]
+    if unknown:
+        fail(F"chip bad blocks {unknown} are used by the image: it was made for another bad block map")
 
     print("")
     print("The chip will be ERASED and rewritten with the image.")
@@ -79,8 +86,10 @@ try:
     out("=====ERASE=====")
     skipped, failed = nt.erase_chip(ser)
     out(F"Bad blocks skipped: {skipped}, erase errors: {failed}")
-    if failed:
-        fail("erase errors, chip not written")
+    # an erase error is harmless on a block the image does not use (e.g. marked bad in its FAT)
+    used_failed = [b for b in failed if b not in image_bad]
+    if used_failed:
+        fail(F"erase errors on blocks used by the image {used_failed}, chip not written")
     if skipped != chip_bad:
         fail(F"the firmware skipped blocks {skipped}, expected {chip_bad}")
 

@@ -191,24 +191,50 @@ def _sector_ecc(data):
         a1 |= _parity(a[j][1]) << j
     return bytes([a0 & 0xff, a0 >> 8, a1 & 0xff, a1 >> 8])
 
-def page_ecc_ok(p):
+def correct_page(p):
+    """Applies the Wii ECC like the console does: single bit errors in a 512 byte sector are
+    corrected. Returns (page, state), state is 'ok', 'corrected' or 'uncorrectable'."""
     if p == ERASED_PAGE:
-        return True
-    return all(_sector_ecc(p[k * 512:(k + 1) * 512]) == p[DATA_SIZE + 0x30 + 4 * k:DATA_SIZE + 0x34 + 4 * k]
-               for k in range(4))
+        return p, 'ok'
+    if p[DATA_SIZE + 0x30:DATA_SIZE + 0x40] == b'\xff' * 16:
+        return p, 'ok'  # written without ECC on purpose (e.g. the boot2 blockmap pages)
+    fixed = bytearray(p)
+    state = 'ok'
+    for k in range(4):
+        stored = p[DATA_SIZE + 0x30 + 4 * k:DATA_SIZE + 0x34 + 4 * k]
+        calc = _sector_ecc(p[k * 512:(k + 1) * 512])
+        if calc == stored:
+            continue
+        e0 = (calc[0] | calc[1] << 8) ^ (stored[0] | stored[1] << 8)
+        e1 = (calc[2] | calc[3] << 8) ^ (stored[2] | stored[3] << 8)
+        if (e0 | e1) >> 12:
+            state = 'uncorrectable'                         # damaged ECC bytes
+        elif e0 ^ e1 == 0xfff:
+            fixed[k * 512 + (e1 >> 3)] ^= 1 << (e1 & 7)     # single bit error in data
+            state = 'corrected' if state == 'ok' else state
+        elif bin(e0).count('1') + bin(e1).count('1') == 1:
+            state = 'corrected' if state == 'ok' else state  # single bit error in the ECC itself
+        else:
+            state = 'uncorrectable'
+    return bytes(fixed), state
 
-def ecc_error_pages(nand, bad_blocks=(), progress=print):
-    errors = []
+def ecc_report(nand, skip_blocks=(), progress=print):
+    """Returns (corrected, uncorrectable) page lists."""
+    corrected = []
+    uncorrectable = []
     for b in range(BLOCK_COUNT):
         if b % 512 == 0:
             progress(F"  ECC check, block {b}...")
-        if b in bad_blocks:
+        if b in skip_blocks:
             continue
         for pg in range(PAGE_COUNT):
             index = b * PAGE_COUNT + pg
-            if not page_ecc_ok(page(nand, index)):
-                errors.append(index)
-    return errors
+            state = correct_page(page(nand, index))[1]
+            if state == 'corrected':
+                corrected.append(index)
+            elif state == 'uncorrectable':
+                uncorrectable.append(index)
+    return corrected, uncorrectable
 
 
 # ===== BootMii keys and SFFS superblocks =====
@@ -224,16 +250,21 @@ def console_id(keys):
     header = keys[:0x100].split(b'\n')[0].decode('ascii', errors='replace')
     return header.split("ConsoleID:")[-1].strip()
 
+def _superblock(nand, sb):
+    """Returns (first cluster, ECC corrected data) of SFFS superblock sb."""
+    cluster = 0x7F00 + sb * 16  # superblock = 16 clusters of 8 pages
+    first = cluster * 8
+    data = b''.join(correct_page(page(nand, first + i))[0][:DATA_SIZE] for i in range(128))
+    return cluster, data
+
 def check_superblocks(nand, keys):
-    """Verifies the HMAC of the 16 SFFS superblocks with the console NAND HMAC key.
-    A valid HMAC proves that the NAND belongs to the console of keys.bin.
-    Returns a list of (index, generation or None, hmac_ok)."""
+    """Verifies the HMAC of the 16 SFFS superblocks with the console NAND HMAC key, after the
+    ECC correction (as the console does). A valid HMAC proves that the NAND belongs to the
+    console of keys.bin. Returns a list of (index, generation or None, hmac_ok)."""
     hmac_key = keys[0x100 + 0x44:0x100 + 0x58]  # OTP NAND HMAC key
     results = []
     for sb in range(16):
-        cluster = 0x7F00 + sb * 16  # superblock = 16 clusters of 8 pages
-        first = cluster * 8
-        data = b''.join(page(nand, first + i)[:DATA_SIZE] for i in range(128))
+        cluster, data = _superblock(nand, sb)
         if data[:4] != b'SFFS':
             results.append((sb, None, False))
             continue
@@ -241,9 +272,21 @@ def check_superblocks(nand, keys):
         salt = bytearray(0x40)
         salt[0x12:0x14] = struct.pack('>H', cluster)
         digest = hmac.new(hmac_key, bytes(salt) + data, hashlib.sha1).digest()
-        stored = page(nand, (cluster + 15) * 8 + 6)[DATA_SIZE + 1:DATA_SIZE + 21]
+        hmac_page = correct_page(page(nand, (cluster + 15) * 8 + 6))[0]
+        stored = hmac_page[DATA_SIZE + 1:DATA_SIZE + 21]
         results.append((sb, generation, digest == stored))
     return results
+
+def fat_bad_blocks(nand, superblocks):
+    """Blocks whose clusters are marked bad (0xFFFD) in the FAT of the newest valid superblock:
+    blocks found bad by the console during use, which have no marker on the chip."""
+    valid = [(sb, gen) for sb, gen, ok in superblocks if ok]
+    if not valid:
+        return []
+    sb = max(valid, key=lambda v: v[1])[0]
+    data = _superblock(nand, sb)[1]
+    fat = struct.unpack('>32768H', data[12:12 + 0x10000])
+    return sorted({cluster // 8 for cluster, value in enumerate(fat) if value == 0xFFFD})
 
 
 def analyze(nand, keys, reference=None, out=print):
@@ -251,30 +294,35 @@ def analyze(nand, keys, reference=None, out=print):
     out(F"Console ID (keys.bin): {console_id(keys)}")
 
     bad = image_bad_blocks(nand)
-    out(F"Bad blocks: {bad}")
+    out(F"Bad blocks (factory marker): {bad}")
 
     superblocks = check_superblocks(nand, keys)
     valid = [(sb, gen) for sb, gen, ok in superblocks if ok]
-    out(F"SFFS superblocks with valid HMAC: {len(valid)}/16")
+    out(F"SFFS superblocks with valid HMAC (after ECC correction): {len(valid)}/16")
     if valid:
         sb, gen = max(valid, key=lambda v: v[1])
         out(F"  newest valid superblock: #{sb}, generation {gen}")
     invalid = [(sb, gen) for sb, gen, ok in superblocks if not ok]
     if invalid:
         out(F"  superblocks without valid HMAC (index, generation): {invalid}")
+    out(F"Bad blocks in the FAT (marked by the console): {fat_bad_blocks(nand, superblocks)}")
 
-    errors = ecc_error_pages(nand, bad, progress=lambda line: print(line))
-    out(F"Pages with ECC mismatch: {len(errors)} {errors[:20]}{' ...' if len(errors) > 20 else ''}")
+    def short(pages):
+        return F"{len(pages)} {pages[:20]}{' ...' if len(pages) > 20 else ''}"
+
+    corrected, uncorrectable = ecc_report(nand, bad, progress=lambda line: print(line))
+    out(F"Pages with single bit ECC errors (corrected by the console): {short(corrected)}")
+    out(F"Pages with uncorrectable ECC errors: {short(uncorrectable)}")
 
     if reference is not None:
         out("Comparison with reference image:")
         out(F"  keys appended to reference == keys.bin: {reference[NAND_SIZE:] == keys}")
-        out(F"  bad blocks equal: {image_bad_blocks(reference) == bad}")
+        out(F"  factory bad blocks equal: {image_bad_blocks(reference) == bad}")
         out(F"  boot1 (block 0) identical: {block(nand, 0) == block(reference, 0)}")
         same_pages = sum(page(nand, i) == page(reference, i) for i in range(BLOCK_COUNT * PAGE_COUNT))
         out(F"  identical pages: {same_pages}/{BLOCK_COUNT * PAGE_COUNT}")
-        ref_errors = set(ecc_error_pages(reference, bad, progress=lambda line: None))
-        new_errors = [p for p in errors if p not in ref_errors]
-        out(F"  ECC mismatches not already present in reference: {len(new_errors)} {new_errors[:20]}")
+        ref_uncorrectable = set(ecc_report(reference, bad, progress=lambda line: None)[1])
+        new_errors = [p for p in uncorrectable if p not in ref_uncorrectable]
+        out(F"  uncorrectable ECC errors not already present in reference: {short(new_errors)}")
 
     return len(valid) > 0
