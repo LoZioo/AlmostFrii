@@ -1,11 +1,14 @@
 import hashlib
 import hmac
+import pathlib
 import struct
 import time
 
+import serial
+
 import console_commands as cc
 
-# Shared helpers for bootmii_backup.py and bootmii_restore.py
+# Shared helpers for bootmii_backup.py, bootmii_restore.py and bad_blocks.py
 
 PAGE_SIZE = 2112
 DATA_SIZE = 2048
@@ -23,6 +26,23 @@ BYTES_START = (cc.BYTES_START + "\r\n").encode()
 
 class NandError(Exception):
     pass
+
+
+# ===== files and serial port =====
+
+def read_file(path, what):
+    """Reads a whole file, with a readable error if it cannot be read."""
+    try:
+        return pathlib.Path(path).read_bytes()
+    except OSError as e:
+        raise NandError(F"cannot read {what} '{path}': {e.strerror}")
+
+
+def open_serial(port):
+    try:
+        return serial.Serial(port, 115200, timeout=3, write_timeout=3)
+    except serial.SerialException as e:
+        raise NandError(F"cannot open serial port {port}: {e}")
 
 
 # ===== serial protocol =====
@@ -173,7 +193,7 @@ def _xor_bytes(v):
         s //= 2
     return v
 
-def _sector_ecc(data):
+def sector_ecc(data):
     v = int.from_bytes(data, 'big')
     x_all = _xor_bytes(v)
     a = [[0, 0] for _ in range(12)]
@@ -201,7 +221,7 @@ def correct_page(p):
     state = 'ok'
     for k in range(4):
         stored = p[DATA_SIZE + 0x30 + 4 * k:DATA_SIZE + 0x34 + 4 * k]
-        calc = _sector_ecc(p[k * 512:(k + 1) * 512])
+        calc = sector_ecc(p[k * 512:(k + 1) * 512])
         if calc == stored:
             continue
         e0 = (calc[0] | calc[1] << 8) ^ (stored[0] | stored[1] << 8)
@@ -239,8 +259,7 @@ def ecc_report(nand, skip_blocks=(), progress=print):
 # ===== BootMii keys and SFFS superblocks =====
 
 def load_keys(path):
-    with open(path, 'rb') as f:
-        keys = f.read()
+    keys = read_file(path, "keys file")
     if len(keys) != KEYS_SIZE or not keys.startswith(b'BackupMii'):
         raise NandError(F"{path} is not a BootMii keys.bin")
     return keys

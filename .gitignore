@@ -5,3 +5,4 @@ nand_dumps
 nand_backup
 bootmii_backup
 bootmii_restore
+program_log

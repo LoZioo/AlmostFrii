@@ -250,7 +250,12 @@ Now every `python ./script.py ...` command of this README runs inside the virtua
 | BootMii format restore (`bootmii_restore/`) | `python ./bootmii_restore.py -P"COM10"` |
 | Raw write of an image | `$NANDErase$me`, then `python ./nand_program.py ./nand.bin -wb -l4096 -a0 -P"COM10"` |
 
-**Note:** the write command in the original *Writing NAND* section (`-wb -4096`) lacks the `l` and writes 0 blocks; the correct option is `-l4096`. `nand_program.py` now stops with an error when `-l` is missing.
+**Notes on the original documentation above:**
+
+- the write command in the *Writing NAND* section (`-wb -4096`) lacks the `l` and writes 0 blocks; the correct option is `-l4096`. `nand_program.py` now stops with an error when `-l` is missing;
+- `program.py` is `nand_program.py`;
+- `&3F$BLOCKErase$me` erases **block** `0x3F` (pages `0xFC0`-`0xFFF`), not page `0x3F`;
+- hex addresses are accepted in lowercase too.
 
 ### Folders
 
@@ -260,6 +265,7 @@ Now every `python ./script.py ...` command of this README runs inside the virtua
 | `bootmii_backup/` | dumps made by `bootmii_backup.py` (`nand-bootmii-{epoch}.bin` + log) |
 | `bootmii_restore/` | `nand.bin` to restore and the console `keys.bin` |
 | `nand_dumps/` | raw dumps of `nand_dump.py` and logs of `bad_blocks.py` |
+| `program_log/` | logs of `nand_program.py` |
 
 These folders contain the console keys and are ignored by git: never publish them.
 
@@ -274,7 +280,7 @@ These folders contain the console keys and are ignored by git: never publish the
   Options: `-k` keys file (default `nand_backup/keys.bin`), `-r` reference image (default `nand_backup/nand.bin`, `-r ""` to skip).
 - **`bootmii_restore.py`**: restores a BootMii `nand.bin` (default `bootmii_restore/nand.bin`, keys from `bootmii_restore/keys.bin` or appended to the image). Before touching the chip it checks the image size, that the appended keys match `keys.bin`, the superblock HMAC (images of other consoles are refused), the NAND ID and that every factory bad block of the chip is excluded by the image (the image may have more bad blocks: those marked by the console in its FAT are not written either). After a `YES` confirmation it erases the chip (bad blocks excluded), writes every non-empty page (each page is checked with SHA256 before programming and resent if corrupted on USB) and verifies every block against the image. This is also useful to recreate a clean NAND from a backup: see the [Wii factory reset guide](https://wii.hacks.guide/wii-factory-reset#restoring-the-wii-nand-to-stock) for the restoring steps on a stock NAND.
 - **`bad_blocks.py`**: reads pages 0 and 1 of every block and lists the factory bad block markers in about 40 seconds, optionally comparing them with an image. Markers are cross-checked with the Wii ECC to filter out read errors.
-- **`nand_tools.py`**: shared module (serial protocol, Wii ECC, SFFS superblock HMAC, keys parsing, coherence report).
+- **`nand_tools.py`**: shared module of the three scripts above (serial protocol, Wii ECC, SFFS superblock HMAC, keys parsing, coherence report). Missing files and a wrong serial port are reported with a readable error.
 
 ## Firmware changes
 
@@ -287,6 +293,12 @@ These folders contain the console keys and are ignored by git: never publish the
 - **Write errors**: `write_page()` now reads the status register after programming, so `WERR` is actually reported (before it checked a stale status).
 - **Bad blocks are never erased**: `$NANDErase$me` reads the marker of pages 0 and 1 of every block (`is_bad_block()`) and skips factory bad blocks, whose marker would otherwise be destroyed. It prints a summary (`bad blocks skipped: N, erase errors: N`). `$BLOCKErase$me` also skips bad blocks and prints `erased` or `EERR`.
 - **Write error recovery**: when the host rejects a page buffer (bad SHA256) the firmware drops the page and goes back to the console, so the host can resend it. Before, it entered an endless loop blinking the LED and the retry implemented in `nand_program.py` could never work. Two `strcpy()` reading past the end of non terminated buffers were fixed.
+- **No more freezes needing a replug**:
+  - a page transfer that stops halfway (e.g. a script interrupted with Ctrl+C) is abandoned after 2 seconds with `timeout`, instead of waiting forever for the missing bytes;
+  - a command with a missing or malformed `&address` answers `bad address` and is not executed, instead of freezing with the LED on (it also no longer falls back to address 0, which for `$BLOCKErase` would be boot1);
+  - garbage on the serial line without `$me` no longer overflows the command buffer.
+- **Page transmission**: `read_page()` sent the page only while bytes were waiting in the USB *receive* buffer (it worked thanks to the `\r` sent by the scripts after each command) and could send bytes past the end of the page. It now waits for room in the *transmit* buffer and sends exactly 2112 bytes.
+- **`$id$me`**: the four ID bytes are printed in a well defined order (the arguments of `printf()` were evaluated in an unspecified order).
 
 ## Script changes
 

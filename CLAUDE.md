@@ -47,7 +47,7 @@ Command strings are defined twice and must stay in sync: `src/console_commands.h
   Don't add extra waits per page: an extra `wait_line` cost 1–3 s per page.
 
 Firmware layout:
-- `main.c`: the command loop and parsing.
+- `main.c`: the command loop and parsing. `decompose_addr()` reports `bad address` and the command is skipped: never fall back to address 0, which for an erase is boot1. A page upload that stalls for 2 s is abandoned with `timeout`.
 - `commands.c`: the NAND operations. Status polling uses `wait_ready()`. Bad-block checks use `is_bad_block()`, which reads the marker on pages 0 and 1. `erase_chip`/`erase_block` never erase factory bad blocks.
 - `pio/read_io_sm.pio`: the PIO state machine for page reads. RE idles high, and RE is held low for 8 cycles before sampling. A dummy RE pulse shifts data by one byte, so don't reintroduce one.
 
@@ -67,5 +67,6 @@ These folders hold the console keys and must never be committed or published:
 - `bootmii_backup/`: output of `bootmii_backup.py`.
 - `bootmii_restore/`: input of `bootmii_restore.py`.
 - `nand_dumps/`: raw dumps and `bad_blocks.py` logs.
+- `program_log/`: `nand_program.py` logs.
 
 In Git Bash, use forward slashes in paths; backslashes get eaten.

@@ -54,9 +54,9 @@ bool marker_found(char *marker) {
     return false;
 }
 
-inline u32 addr_to_u32(int start_idx, int end_idx) {
+inline bool addr_to_u32(int start_idx, int end_idx, u32 *addr) {
 
-        u32 addr = 0;
+        *addr = 0;
         for (int i = start_idx + 1; i < end_idx; i++) {
         char c = str[i];
 
@@ -68,39 +68,30 @@ inline u32 addr_to_u32(int start_idx, int end_idx) {
         else if (c >= 'a' && c <= 'f')
             value = c - 'a' + 10;
         else
-            break; // invalid hex
+            return false; // invalid hex
 
-        addr = (addr << 4) | value;
+        *addr = (*addr << 4) | value;
     }
 
-    return addr;
+    return true;
 }
 
 
-u32 decompose_addr() {
+// parses the "&<hex>$" address of the current command. On a malformed address it reports
+// "bad address" and returns false: the command must not run (address 0 is boot1)
+bool decompose_addr(u32 *addr) {
 
-    char c = '\0';
-
-    u32 addr = 0;
     char *start = strchr(str,'&');
     char *end = strchr(str,'$');
 
-    if((!(start && end)) || abs( ((int)(((u8*)start)-str))  -((int)(((u8*)end)-str)) ) <= 1) {
-
-        toggle_LED(1);
-        while(1);
+    if(!(start && end) || end - start <= 1 || !addr_to_u32((u8*)start-str,(u8*)end-str,addr)) {
+        puts("bad address");
+        return false;
     }
 
-    int start_idx = (int)((u8*)start-str);
-    int end_idx = (int)((u8*)end-str);
+   // printf("addr: %x\n",*addr);
 
-
-    addr = addr_to_u32(start_idx,end_idx);
-
-
-   // printf("addr: %x\n",addr);
-
-    return addr;
+    return true;
 }
 
 
@@ -111,17 +102,33 @@ inline int read_byte_blocking(void) {
 }
 
 
+#define BYTE_TIMEOUT_US 2000000 // a page transfer stalled for this long is abandoned
+
+// returns the byte, or EOF if nothing arrives within BYTE_TIMEOUT_US
+int read_byte_timeout(void) {
+    uint8_t b;
+    absolute_time_t end = make_timeout_time_us(BYTE_TIMEOUT_US);
+    while (tud_cdc_read(&b, 1) != 1) {
+        if (time_reached(end))
+            return EOF;
+    }
+    return b;
+}
+
+
+// returns the number of bytes read: less than len if the host stopped sending
 int read_n_bytes(u8 * buf, size_t idx, size_t len) {
     int i = 0;
 
     while(i < len) {
 
-        int in = read_byte_blocking();
+        int in = read_byte_timeout();
 
-        if(in!=EOF){
-            buf[idx+i] = (u8)in;
-            i++;
-        }
+        if(in==EOF)
+            break;
+
+        buf[idx+i] = (u8)in;
+        i++;
     }
 
     return i;
@@ -149,7 +156,10 @@ void console() {
 
             // wait for chunk prefix
             u8 mrkr[4] = {0}; // 3 chars + terminator (copied into failMsg)
-            read_n_bytes(mrkr,0,3);
+            if(read_n_bytes(mrkr,0,3) != 3){
+                strcpy(failMsg ,"timeout");
+                goto end;
+            }
 
             if(strncmp(mrkr,BYTES_START,3)!=0){
                 strcpy(failMsg ,mrkr);
@@ -174,13 +184,21 @@ void console() {
                     goto end;
                 }*/
 
-                buffer_bytes += read_n_bytes(pageBuffer,chunk_idx*CHUNK_SIZE,CHUNK_SIZE);
+                int got = read_n_bytes(pageBuffer,chunk_idx*CHUNK_SIZE,CHUNK_SIZE);
+                buffer_bytes += got;
+                if(got != CHUNK_SIZE){
+                    strcpy(failMsg ,"timeout");
+                    goto end;
+                }
                 chunk_idx++;
 
             }
 
                 // get chunk suffix
-                read_n_bytes(mrkr,0,3);
+                if(read_n_bytes(mrkr,0,3) != 3){
+                    strcpy(failMsg ,"timeout");
+                    goto end;
+                }
                 if(strncmp(mrkr,BYTES_FINISHED,3)!=0){
                     strcpy(failMsg ,"bad $bf!");
                     goto end;
@@ -199,7 +217,7 @@ void console() {
 
             // wait for SHA good
             char ack = '\0';
-            read_n_bytes(&ack,0,1);
+            read_n_bytes(&ack,0,1); // on timeout ack stays '\0': page not written
 
             if(ack != 'w'){
                 // host rejected the buffer (e.g. bad SHA): drop the page, host will resend it
@@ -236,10 +254,18 @@ void console() {
 
 
         if(in>0){
+            // garbage without "$me" (e.g. the rest of an abandoned page): start over instead of
+            // writing past the end of str
+            if(str_idx >= sizeof(str) - 1)
+                str_idx = 0;
+
             str[str_idx++]  = (u8)in;
 
             if(marker_found(MESSAGE_END)){
                 str_idx-=LEN_MSG_END;
+                str[str_idx] = '\0'; // strchr() in decompose_addr() must not see older commands
+
+                u32 addr;
 
 
 
@@ -254,7 +280,8 @@ void console() {
 
 
                 else if(marker_found(SET_W_ADDR)) {
-                    write_addr = decompose_addr()&0x3ffff;
+                    if(decompose_addr(&addr))
+                        write_addr = addr&0x3ffff;
                    // printf("page address set to 0x%x\n",write_addr);
 
                 }
@@ -267,30 +294,38 @@ void console() {
                 
                 
                 else if(marker_found(SET_W_TST_VAL)){
-                    test_val = (u8)(decompose_addr()&0xff); // test pattern set
-                    printf("set test pattern to \"%x.\"\n",test_val);
+                    if(decompose_addr(&addr)){
+                        test_val = (u8)(addr&0xff); // test pattern set
+                        printf("set test pattern to \"%x.\"\n",test_val);
+                    }
                 }
 
                 else if(marker_found(TEST_W)){
-                    write_page((decompose_addr()&0x3ffff),NULL,PAGE_SIZE,true,test_val); // test pattern write
+                    if(decompose_addr(&addr))
+                        write_page((addr&0x3ffff),NULL,PAGE_SIZE,true,test_val); // test pattern write
                 }
 
                 else if(marker_found(READ_PAGE)){
-                    read_page((decompose_addr()&0x3ffff));   // page read
+                    if(decompose_addr(&addr))
+                        read_page((addr&0x3ffff));   // page read
                 }
 
                 else if(marker_found(BLOCK_SHA)){
-                    get_block_SHA(decompose_addr()&0xfff);
+                    if(decompose_addr(&addr))
+                        get_block_SHA(addr&0xfff);
                 }
                  else if(marker_found(PAGE_SHA)){
-                    get_page_SHA(decompose_addr()&0x3ffff);
+                    if(decompose_addr(&addr))
+                        get_page_SHA(addr&0x3ffff);
                  }
                 else if(marker_found(BLOCK_ERASE)){
-                    u32 block = decompose_addr()&0xfff;
-                    if(is_bad_block(block))
-                        printf("block %d: bad block, skipped\n",block);
-                    else
-                        puts(erase_block(block) ? "erased" : "EERR"); // block erase (takes row address only)       
+                    if(decompose_addr(&addr)){
+                        u32 block = addr&0xfff;
+                        if(is_bad_block(block))
+                            printf("block %d: bad block, skipped\n",block);
+                        else
+                            puts(erase_block(block) ? "erased" : "EERR"); // block erase (takes row address only)
+                    }
                 }
                 else if(marker_found(CHIP_ERASE)){
                     erase_chip(); // full chip erase

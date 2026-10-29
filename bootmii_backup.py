@@ -4,8 +4,6 @@ import pathlib
 import sys
 import time
 
-import serial
-
 import nand_tools as nt
 
 # Dumps the whole NAND in BootMii format (raw NAND + keys.bin appended) and checks that it
@@ -19,14 +17,20 @@ parser.add_argument('-r', dest='reference', default='nand_backup/nand.bin',
                     help="reference BootMii nand.bin to compare with ('' to skip)")
 args = parser.parse_args()
 
-keys = nt.load_keys(args.keys)
+def fail(message):
+    print("ERROR: " + message)
+    sys.exit(1)
 
-reference = None
-if args.reference:
-    reference = pathlib.Path(args.reference).read_bytes()
-    if len(reference) != nt.BOOTMII_SIZE:
-        print(F"ERROR: {args.reference} is not a BootMii nand.bin ({len(reference)} bytes)")
-        sys.exit(1)
+try:
+    keys = nt.load_keys(args.keys)
+    reference = None
+    if args.reference:
+        reference = nt.read_file(args.reference, "reference image")
+        if len(reference) != nt.BOOTMII_SIZE:
+            fail(F"{args.reference} is not a BootMii nand.bin ({len(reference)} bytes)")
+    ser = nt.open_serial(args.port)
+except nt.NandError as e:
+    fail(str(e))
 
 pathlib.Path("bootmii_backup").mkdir(exist_ok=True)
 filename = F'bootmii_backup/nand-bootmii-{time.time()}.bin'
@@ -37,7 +41,6 @@ def out(line):
     log.write(line + "\n")
     log.flush()
 
-ser = serial.Serial(args.port, 115200, timeout=3, write_timeout=3)
 start_time = time.time()
 
 try:
@@ -61,6 +64,11 @@ try:
         nand += data
         print(F"block {block}/{nt.BLOCK_COUNT - 1} read ({len(nand) / 1E6:.1f} MB), {time.time() - block_time:.2f} s")
 
+except nt.NandError as e:
+    out(F"ERROR: {e}")
+    out("Dump interrupted, nothing written.")
+    log.close()
+    sys.exit(1)
 finally:
     ser.close()
 

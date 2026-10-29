@@ -391,10 +391,7 @@ void read_id() {
 
     gpio_put(CE_,1);
 
-    {
-        int idx = 0;
-        printf("ID: %x %x %x %x\nShould be: ad dc 10 95\n",id[idx++],id[idx++],id[idx++],id[idx++]);
-    }
+    printf("ID: %x %x %x %x\nShould be: ad dc 10 95\n",id[0],id[1],id[2],id[3]);
 
 }
 
@@ -514,14 +511,18 @@ void read_page(u32 addr) {
 
     gpio_put(CE_,1);
 
-    // binary tx with tusb
+    // binary tx with tusb: send only what fits in the TX FIFO and never past the end of the page
     u32 sent_bytes = 0;
     puts(BYTES_START);
-    while(sent_bytes < PAGE_SIZE)
-        if(tud_cdc_available()){
-            sent_bytes+= tud_cdc_write(&pageBuffer[sent_bytes], CFG_TUD_CDC_EP_BUFSIZE);
+    while(sent_bytes < PAGE_SIZE) {
+        u32 n = tud_cdc_write_available();
+        if(n){
+            if(n > PAGE_SIZE - sent_bytes)
+                n = PAGE_SIZE - sent_bytes;
+            sent_bytes+= tud_cdc_write(&pageBuffer[sent_bytes], n);
             tud_cdc_write_flush();
         }
+    }
     puts(BYTES_FINISHED);
 
 

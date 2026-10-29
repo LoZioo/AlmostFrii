@@ -4,8 +4,6 @@ import pathlib
 import sys
 import time
 
-import serial
-
 import nand_tools as nt
 
 # Restores a BootMii nand.bin on the chip: checks the image, erases the chip (bad blocks are
@@ -35,7 +33,10 @@ def fail(message):
 
 # ===== image checks =====
 
-image = pathlib.Path(args.image).read_bytes()
+try:
+    image = nt.read_file(args.image, "image")
+except nt.NandError as e:
+    fail(str(e))
 if len(image) not in (nt.NAND_SIZE, nt.BOOTMII_SIZE):
     fail(F"{args.image} has a wrong size ({len(image)} bytes)")
 nand = image[:nt.NAND_SIZE]
@@ -43,7 +44,10 @@ appended_keys = image[nt.NAND_SIZE:] or None
 
 keys = None
 if pathlib.Path(args.keys).is_file():
-    keys = nt.load_keys(args.keys)
+    try:
+        keys = nt.load_keys(args.keys)
+    except nt.NandError as e:
+        fail(str(e))
     if appended_keys is not None and appended_keys != keys:
         fail(F"keys appended to {args.image} differ from {args.keys}: they come from different consoles")
 elif appended_keys is not None:
@@ -61,7 +65,10 @@ image_factory_bad = nt.image_bad_blocks(nand)
 image_bad = sorted(set(image_factory_bad) | set(nt.fat_bad_blocks(nand, nt.check_superblocks(nand, keys))))
 out(F"Blocks not written (factory or FAT bad): {image_bad}")
 
-ser = serial.Serial(args.port, 115200, timeout=3, write_timeout=3)
+try:
+    ser = nt.open_serial(args.port)
+except nt.NandError as e:
+    fail(str(e))
 
 try:
     # ===== chip checks =====
@@ -97,19 +104,33 @@ try:
     out("")
     out("=====WRITE=====")
     start_time = time.time()
+    empty_from = None  # first block of the current run of empty blocks
+
+    def flush_empty(end):
+        global empty_from
+        if empty_from is not None:
+            span = F"block {empty_from}" if empty_from == end else F"blocks {empty_from}-{end}"
+            print(F"{span}: empty, nothing to write")
+            empty_from = None
+
     for block in range(nt.BLOCK_COUNT):
         block_time = time.time()
         if block in image_bad:
+            flush_empty(block - 1)
             print(F"block {block}/{nt.BLOCK_COUNT - 1}: bad block, skipped")
             continue
-        written = 0
-        for pg in range(nt.PAGE_COUNT):
+        pages = [pg for pg in range(nt.PAGE_COUNT)
+                 if nt.page(nand, block * nt.PAGE_COUNT + pg) != nt.ERASED_PAGE]  # the chip is already erased
+        if not pages:
+            if empty_from is None:
+                empty_from = block
+            continue
+        flush_empty(block - 1)
+        for pg in pages:
             index = block * nt.PAGE_COUNT + pg
-            data = nt.page(nand, index)
-            if data != nt.ERASED_PAGE:  # the chip is already erased
-                nt.write_page(ser, index, data)
-                written += 1
-        print(F"block {block}/{nt.BLOCK_COUNT - 1}: {written} pages written, {time.time() - block_time:.2f} s")
+            nt.write_page(ser, index, nt.page(nand, index))
+        print(F"block {block}/{nt.BLOCK_COUNT - 1}: {len(pages)} pages written, {time.time() - block_time:.2f} s")
+    flush_empty(nt.BLOCK_COUNT - 1)
     out(F"Write completed in {(time.time() - start_time) / 60:.1f} minutes.")
 
     # ===== verify =====
